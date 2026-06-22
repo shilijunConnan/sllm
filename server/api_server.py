@@ -1,13 +1,14 @@
 import argparse
 import os
 import time
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 
 from sllm.utils.request_tools import *
-from async_llm_v1 import AsyncLLM
+from async_llm import AsyncLLM
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,24 +25,19 @@ def parse_args() -> argparse.Namespace:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global async_llm, scheduler_task, args
+    global async_llm, args
 
     args = parse_args()
     async_llm = AsyncLLM(args.model_path, args.served_model_name)
     async_llm.init_engine()
-    scheduler_task = asyncio.create_task(async_llm.scheduler())
     app.host(args.host, args.port)
     print("scheduler started")
 
     yield
 
     print("shutting down scheduler")
-    scheduler_task.cancel()
     async_llm.shutdown()
-    try:
-        await scheduler_task
-    except asyncio.CancelledError:
-        pass
+
 
 
 app = FastAPI(
@@ -58,10 +54,10 @@ async def health() -> dict:
 @app.post("/v1/chat/completions")
 async def create_chat_completion(request: ChatCompletionRequest):
     global async_llm
-    request_id, ctx = async_llm.add_request(request)
+    request_id = str(uuid.uuid4())
     created = int(time.time())
     return StreamingResponse(
-        stream_generator(request_id, ctx, request.model, created),
+        stream_generator(request_id, async_llm.async_generate(request_id,request), request.model, created),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -19,10 +19,10 @@ class InputProcessor:
     def encode(self, text: List[dict]) -> Dict[str, torch.Tensor]:
         text = self._apply_chat_template(text)
         inputs = self.tokenizer(text,
-                              return_tensors="pt",
-                              max_length=self.sllm_config.max_input_len,
-                              padding=True,
-                              truncation=True)
+                                return_tensors="pt",
+                                max_length=self.sllm_config.max_input_len,
+                                padding=True,
+                                truncation=True)
         input_ids = inputs["input_ids"]
         attention_mask = inputs["attention_mask"]
         position_ids = torch.arange(0, input_ids.shape[1]).expand(input_ids.shape[0], input_ids.shape[1])
@@ -30,4 +30,3 @@ class InputProcessor:
 
     def decode(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.tokenizer.batch_decode(token_ids, skip_special_tokens=True)
-

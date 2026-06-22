@@ -1,5 +1,5 @@
 """
-model文件最基础版本：无kvcache、算子优化
+v1版本：kv cache V1版本
 """
 import torch
 import torch.nn as nn
@@ -7,6 +7,8 @@ import torch.nn as nn
 from sllm.utils.mappings import ACT2CLS
 from sllm.utils.config import ModelConfig
 from sllm.utils.pretrained import ModelPretrained
+from sllm.core.kvcache.kv_cache import KVCache
+
 
 class Embedding(nn.Embedding):
     def __init__(self,
@@ -91,9 +93,14 @@ class SelfAttention(nn.Module):
                 input_tensor: torch.Tensor,
                 rotary_embed: RotaryEmbedding,
                 position_ids: torch.Tensor,
-                attention_mask: torch.Tensor = None) -> torch.Tensor:
+                past_key_values: KVCache,
+                idx: int,
+                attention_mask: torch.Tensor = None,
+                ) -> torch.Tensor:
         input_shape = input_tensor.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
+        is_decode = input_tensor.shape[1] == 1
+
         q = self.q_norm(self.q_proj(input_tensor).view(hidden_shape).transpose(1, 2))
         k = self.k_norm(self.k_proj(input_tensor).view(hidden_shape).transpose(1, 2))
         v = self.v_proj(input_tensor).view(hidden_shape).transpose(1, 2)
@@ -101,17 +108,24 @@ class SelfAttention(nn.Module):
         q = rotary_embed.apply_rotary_pos_emb(q, position_ids)
         k = rotary_embed.apply_rotary_pos_emb(k, position_ids)
 
+        past_key_values.update_cache(idx, k, v)
+        k, v = past_key_values.get_cache(idx)
+
         k = self._repeat_kv(k)
         v = self._repeat_kv(v)
 
         score = torch.matmul(q, k.transpose(-1, -2)) * self.scale
         mask_value = torch.finfo(score.dtype).min
-        seq_len = score.shape[-1]
-        causal_mask = torch.triu(
-            torch.ones(seq_len, seq_len, device=score.device, dtype=torch.bool),
-            diagonal=1,
-        )
-        score = score.masked_fill(causal_mask[None, None, :, :], mask_value)
+
+        if is_decode:
+            pass
+        else:
+            seq_len = score.shape[-1]
+            causal_mask = torch.triu(
+                torch.ones(seq_len, seq_len, device=score.device, dtype=torch.bool),
+                diagonal=1,
+            )
+            score = score.masked_fill(causal_mask[None, None, :, :], mask_value)
 
         if attention_mask is not None:
             mask = (1 - attention_mask[:, None, None, :]) * mask_value
@@ -162,10 +176,14 @@ class DecoderLayer(nn.Module):
                 input_tensor: torch.Tensor,
                 rotary_embed: RotaryEmbedding,
                 position_ids: torch.Tensor,
-                attention_mask: torch.Tensor) -> torch.Tensor:
-        x = input_tensor + self.self_attn(self.input_layernorm(input_tensor), rotary_embed, position_ids, attention_mask)
+                attention_mask: torch.Tensor,
+                past_key_values: KVCache,
+                idx: int) -> torch.Tensor:
+        x = input_tensor + self.self_attn(self.input_layernorm(input_tensor), rotary_embed, position_ids,
+                                          past_key_values, idx, attention_mask)
         x = x + self.mlp(self.post_attention_layernorm(x))
         return x
+
 
 class Qwen3Model(nn.Module):
     def __init__(self, model_config: ModelConfig):
@@ -181,13 +199,20 @@ class Qwen3Model(nn.Module):
     def forward(self,
                 input_ids: torch.Tensor,
                 position_ids: torch.Tensor,
-                attention_mask: torch.Tensor) -> torch.Tensor:
+                attention_mask: torch.Tensor,
+                past_key_values: KVCache) -> torch.Tensor:
         input_tensor = self.embed_tokens(input_ids)
 
-        for layer in self.layers:
-            input_tensor = layer(input_tensor, self.rotary_emb, position_ids, attention_mask)
+        for idx, layer in enumerate(self.layers):
+            input_tensor = layer(input_tensor,
+                                 self.rotary_emb,
+                                 position_ids,
+                                 attention_mask,
+                                 past_key_values,
+                                 idx)
 
         return self.norm(input_tensor)
+
 
 class Qwen3ForCausalLM(nn.Module, ModelPretrained):
     def __init__(self, model_config: ModelConfig):
@@ -201,7 +226,11 @@ class Qwen3ForCausalLM(nn.Module, ModelPretrained):
         if model_config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
-    def forward(self, input_ids: torch.Tensor, position_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.model(input_ids, position_ids, attention_mask)
+    def forward(self,
+                input_ids: torch.Tensor,
+                position_ids: torch.Tensor,
+                attention_mask: torch.Tensor,
+                past_key_values: KVCache) -> torch.Tensor:
+        hidden_states = self.model(input_ids, position_ids, attention_mask, past_key_values)
         output = self.lm_head(hidden_states)
         return output

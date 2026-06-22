@@ -1,5 +1,5 @@
-# from .qwen3_base import Qwen3ForCausalLM
-from .qwen3_v1 import Qwen3ForCausalLM
+# from .qwen3 import Qwen3ForCausalLM
+from .qwen3 import Qwen3ForCausalLM
 # 建立架构名称与具体类的映射关系
 _MODELS_REGISTRY = {
     "Qwen3ForCausalLM": Qwen3ForCausalLM,

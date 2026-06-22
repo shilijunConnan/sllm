@@ -1,6 +1,6 @@
 from sllm.benchmark.common.data_loader import BenchmarkDataLoader
 from sllm.utils.timer import Timer
-from sllm.engine.llm_engine_v1 import LlmEngineV1
+from sllm.engine.llm_engine import LlmEngine
 
 model_path = "/Users/shilijun-air/shilijun/huggingface/Qwen3-0.6B"
 
@@ -8,7 +8,7 @@ with Timer().timing("init dataloader"):
     dataloader = BenchmarkDataLoader(total_size=32, batch_size=32).get_dataloader()
 
 with Timer().timing("init model"):
-    llm_engine = LlmEngineV1(model_path)
+    llm_engine = LlmEngine(model_path)
 
 with Timer().timing("batch generation"):
     for batch in dataloader:

@@ -1,7 +1,6 @@
 import asyncio
 import json
-from typing import Iterator, List, Literal, Optional
-
+from typing import List, Literal, Optional, AsyncGenerator
 from pydantic import BaseModel, Field
 
 
@@ -14,6 +13,7 @@ class ChatCompletionRequest(BaseModel):
     model: str = Field(default="sllm")
     messages: List[ChatMessage]
     stream: bool = Field(default=True)
+    max_tokens: int = Field(default=100)
     temperature: float = Field(default=1.0)
 
 
@@ -42,24 +42,7 @@ def build_chunk(
         ],
     }
 
-class RequestContext:
-    def __init__(self):
-        self.queue = asyncio.Queue()
-
-    async def send(self, token: str):
-        await self.queue.put(token)
-
-    async def close(self):
-        await self.queue.put(None)
-
-    async def __aiter__(self):
-        while True:
-            x = await self.queue.get()
-            if x is None:
-                break
-            yield x
-
-async def stream_generator(request_id: str, ctx: RequestContext, served_model_name: str, created_time: int):
+async def stream_generator(request_id: str, ctx: AsyncGenerator , served_model_name: str, created_time: int):
     async for delta in ctx:
         data = build_chunk(
             request_id=request_id,
