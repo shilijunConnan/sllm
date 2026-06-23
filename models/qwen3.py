@@ -1,6 +1,8 @@
 """
 v1版本：kv cache V1版本
 """
+from typing import List, Optional
+
 import torch
 import torch.nn as nn
 
@@ -96,10 +98,11 @@ class SelfAttention(nn.Module):
                 past_key_values: KVCache,
                 idx: int,
                 attention_mask: torch.Tensor = None,
+                kv_pos: Optional[List[int]] = None,
+                is_decode: bool = False
                 ) -> torch.Tensor:
         input_shape = input_tensor.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
-        is_decode = input_tensor.shape[1] == 1
 
         q = self.q_norm(self.q_proj(input_tensor).view(hidden_shape).transpose(1, 2))
         k = self.k_norm(self.k_proj(input_tensor).view(hidden_shape).transpose(1, 2))
@@ -108,7 +111,13 @@ class SelfAttention(nn.Module):
         q = rotary_embed.apply_rotary_pos_emb(q, position_ids)
         k = rotary_embed.apply_rotary_pos_emb(k, position_ids)
 
-        past_key_values.update_cache(idx, k, v)
+        if kv_pos is None:
+            past_key_values.update_cache(idx, k, v)
+        else:
+            for i, pos in enumerate(kv_pos):
+                past_key_values.v_values[idx][:, :, pos, :] = v[i, :, 0, :]
+                past_key_values.k_values[idx][:, :, pos, :] = k[i, :, 0, :]
+
         k, v = past_key_values.get_cache(idx)
 
         k = self._repeat_kv(k)
@@ -116,6 +125,7 @@ class SelfAttention(nn.Module):
 
         score = torch.matmul(q, k.transpose(-1, -2)) * self.scale
         mask_value = torch.finfo(score.dtype).min
+
 
         if is_decode:
             pass
@@ -127,9 +137,8 @@ class SelfAttention(nn.Module):
             )
             score = score.masked_fill(causal_mask[None, None, :, :], mask_value)
 
-        if attention_mask is not None:
-            mask = (1 - attention_mask[:, None, None, :]) * mask_value
-            score += mask
+        mask = (1 - attention_mask[:, None, None, :]) * mask_value
+        score += mask
 
         score = nn.functional.dropout(torch.softmax(score, dim=-1), p=self.attention_dropout, training=self.training)
         output = (score @ v).transpose(1, 2).reshape(*input_shape, -1).contiguous()
@@ -178,9 +187,11 @@ class DecoderLayer(nn.Module):
                 position_ids: torch.Tensor,
                 attention_mask: torch.Tensor,
                 past_key_values: KVCache,
-                idx: int) -> torch.Tensor:
+                idx: int,
+                kv_pos: Optional[List[int]] = None,
+                is_decode: bool = False) -> torch.Tensor:
         x = input_tensor + self.self_attn(self.input_layernorm(input_tensor), rotary_embed, position_ids,
-                                          past_key_values, idx, attention_mask)
+                                          past_key_values, idx, attention_mask, kv_pos, is_decode=is_decode)
         x = x + self.mlp(self.post_attention_layernorm(x))
         return x
 
@@ -200,7 +211,9 @@ class Qwen3Model(nn.Module):
                 input_ids: torch.Tensor,
                 position_ids: torch.Tensor,
                 attention_mask: torch.Tensor,
-                past_key_values: KVCache) -> torch.Tensor:
+                past_key_values: KVCache,
+                kv_pos: Optional[List[int]] = None,
+                is_decode: bool = False) -> torch.Tensor:
         input_tensor = self.embed_tokens(input_ids)
 
         for idx, layer in enumerate(self.layers):
@@ -209,7 +222,9 @@ class Qwen3Model(nn.Module):
                                  position_ids,
                                  attention_mask,
                                  past_key_values,
-                                 idx)
+                                 idx,
+                                 kv_pos,
+                                 is_decode)
 
         return self.norm(input_tensor)
 
@@ -230,7 +245,9 @@ class Qwen3ForCausalLM(nn.Module, ModelPretrained):
                 input_ids: torch.Tensor,
                 position_ids: torch.Tensor,
                 attention_mask: torch.Tensor,
-                past_key_values: KVCache) -> torch.Tensor:
-        hidden_states = self.model(input_ids, position_ids, attention_mask, past_key_values)
+                past_key_values: KVCache,
+                kv_pos: Optional[List[int]] = None,
+                is_decode: bool = False) -> torch.Tensor:
+        hidden_states = self.model(input_ids, position_ids, attention_mask, past_key_values, kv_pos, is_decode)
         output = self.lm_head(hidden_states)
         return output

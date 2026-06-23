@@ -15,8 +15,8 @@ class KVCache:
             self.k_values[idx] = k
             self.v_values[idx] = v
         else:
-            self.k_values[idx] = torch.cat((self.k_values[idx], k), dim=-2)
-            self.v_values[idx] = torch.cat((self.v_values[idx], v), dim=-2)
+            self.k_values[idx] = torch.cat((self.k_values[idx], k[:,:,-1:,:]), dim=-2)
+            self.v_values[idx] = torch.cat((self.v_values[idx], v[:,:,-1:,:]), dim=-2)
 
     def get_cache(self, idx: int):
         return (self.k_values[idx], self.v_values[idx])

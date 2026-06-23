@@ -20,7 +20,9 @@ class OutputProcessor:
             return logits
 
         logits = logits.clone()
+
         for batch_idx in range(logits.shape[0]):
+
             token_ids = torch.unique(input_ids[batch_idx])
             token_logits = logits[batch_idx, token_ids]
             logits[batch_idx, token_ids] = torch.where(

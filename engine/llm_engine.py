@@ -3,6 +3,7 @@ from typing import Iterator, List, Tuple, Union
 
 import torch
 
+from sllm.core.scheduler.batch import BatchBuilder
 from models import get_model_class
 from processor.output_processor import OutputProcessor
 from sllm.utils.config import ModelConfig, GenerationConfig, SllmConfig
@@ -39,6 +40,7 @@ class LlmEngine:
 
         # 0.4 init scheduler
         self.scheduler = Scheduler(max_batch_size=self.sllm_config.max_batch_size)
+        self.batch_builder = BatchBuilder(pad_token_id=self.input_processor.get_pad_token_id(), device=self.device)
 
     def add_request(self, request_id: str, request: ChatCompletionRequest) -> RequestState:
         input_ids, attention_mask, position_ids = self._prepare_inputs(request.messages)
@@ -55,28 +57,34 @@ class LlmEngine:
     async def prefill_background_loop(self):
         while True:
             await self.scheduler.prefill_event.wait()
-            prefill_requests = self.scheduler.get_prefill_batch()
+            prefill_requests: List[RequestState] = self.scheduler.get_prefill_batch()
             if not self.scheduler.prefill_waiting_queue:
                 self.scheduler.prefill_event.clear()
 
             if prefill_requests:
                 try:
-                    for req in prefill_requests:
-                        logits = self.model_runner.execute(
-                            input_ids=req.input_ids,
-                            attention_mask=req.attention_mask,
-                            position_ids=req.position_ids,
-                            past_key_values=req.kv_cache
-                        )
+                    batch = self.batch_builder.prefill_build(prefill_requests, self.model_config.num_hidden_layers)
+                    logits = self.model_runner.execute(
+                        input_ids=batch.input_ids,
+                        attention_mask=batch.attention_mask,
+                        position_ids=batch.position_ids,
+                        past_key_values=batch.pask_keys_values,
+                        is_decode=False
+                    )
 
-                        next_token_logits = logits[:, -1, :]
-                        next_token_ids = self.output_processor.sample(next_token_logits, req.input_ids)
+                    next_token_logits = logits[:, -1:, :]
 
-                        if self._is_eos(next_token_ids).all() or req.max_tokens <= 1:
+                    for idx, req in enumerate(prefill_requests):
+                        # pass sample params here
+
+                        next_token_id = self.output_processor.sample(next_token_logits[idx, :, :],
+                                                                     batch.input_ids[idx, :])
+
+                        if self._is_eos(next_token_id) or req.max_tokens <= 1:
                             req.status = RequestStatus.FINISHED
                             req.words_queue.put_nowait(None)
                             continue
-                        req.generated_ids.append(next_token_ids.item())
+                        req.generated_ids.append(next_token_id.item())
                         req.generated_token_num += 1
                         req.generated_text = self.input_processor.decode(req.generated_ids)
                         if req.generated_text != "":
@@ -84,6 +92,11 @@ class LlmEngine:
                         req.attention_mask = None
                         req.position_ids = None
                         req.status = RequestStatus.DECODER_WAITING
+
+                        for i in range(self.model_config.num_hidden_layers):
+                            k_values = batch.pask_keys_values.k_values[i][idx, :, -req.inputs_token_num:, :]
+                            v_values = batch.pask_keys_values.v_values[i][idx, :, -req.inputs_token_num:, :]
+                            req.kv_cache.update_cache(i, k_values.unsqueeze(0), v_values.unsqueeze(0))
                     self.scheduler.remove_prefilled_requests()
                     await asyncio.sleep(0)
                 except Exception as e:
@@ -99,37 +112,51 @@ class LlmEngine:
             decode_requests = self.scheduler.get_decode_batch()
 
             if decode_requests:
-                for req in decode_requests:
-                    input_ids = torch.LongTensor([[req.generated_ids[-1]]]).to(self.device)
-                    attention_mask = torch.ones((1, req.get_cur_position())).to(self.device)
-                    position_ids = torch.LongTensor([[req.get_cur_position() - 1]]).to(self.device)
+                try:
+                    batch = self.batch_builder.decode_build(decode_requests, self.model_config.num_hidden_layers)
                     logits = self.model_runner.execute(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        position_ids=position_ids,
-                        past_key_values=req.kv_cache
+                        input_ids=batch.input_ids,
+                        attention_mask=batch.attention_mask,
+                        position_ids=batch.position_ids,
+                        past_key_values=batch.pask_keys_values,
+                        kv_pos=batch.kv_pos,
+                        is_decode=True
                     )
-                    next_token_logits = logits[:, -1, :]
-                    next_token_ids = self.output_processor.sample(next_token_logits, req.input_ids)
+                    for idx, req in enumerate(decode_requests):
+                        pre_token = torch.cat(
+                            (req.input_ids, torch.tensor(req.generated_ids, device=self.device).unsqueeze(0)), dim=-1)
+                        next_token_id = self.output_processor.sample(logits[idx, :, :], pre_token)
 
-                    if self._is_eos(next_token_ids).all() or req.max_tokens <= req.generated_token_num + 1:
-                        req.status = RequestStatus.FINISHED
-                        req.words_queue.put_nowait(None)
-                        continue
-                    req.generated_ids.append(next_token_ids.item())
-                    req.generated_token_num += 1
+                        if self._is_eos(next_token_id) or req.max_tokens <= req.generated_token_num + 1:
+                            req.status = RequestStatus.FINISHED
+                            req.words_queue.put_nowait(None)
+                            continue
+                        req.generated_ids.append(next_token_id.item())
+                        req.generated_token_num += 1
 
-                    cur_text = self.input_processor.decode(req.generated_ids)
-                    one_token = cur_text[0][len(req.generated_text[0]):]
-                    req.generated_text = cur_text
-                    if one_token != "":
-                        req.words_queue.put_nowait(one_token)
-                    req.attention_mask = None
-                    req.position_ids = None
-                self.scheduler.remove_finished_requests()
-                if len(self.scheduler.decode_queue) == 0:
-                    self.scheduler.decode_event.clear()
-                await asyncio.sleep(0)
+                        cur_text = self.input_processor.decode(req.generated_ids)
+                        one_token = cur_text[0][len(req.generated_text[0]):]
+                        req.generated_text = cur_text
+                        if one_token != "":
+                            req.words_queue.put_nowait(one_token)
+                        req.attention_mask = None
+                        req.position_ids = None
+
+                        for i in range(self.model_config.num_hidden_layers):
+                            req.kv_cache.update_cache(
+                                i,
+                                batch.pask_keys_values.k_values[i][:, :, batch.kv_pos[idx]: batch.kv_pos[idx] + 1, :],
+                                batch.pask_keys_values.v_values[i][:, :, batch.kv_pos[idx]: batch.kv_pos[idx] + 1, :]
+                            )
+
+                    self.scheduler.remove_finished_requests()
+                    if len(self.scheduler.decode_queue) == 0:
+                        self.scheduler.decode_event.clear()
+                    await asyncio.sleep(0)
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    break
             else:
                 await asyncio.sleep(0.1)
                 continue
@@ -158,40 +185,6 @@ class LlmEngine:
             # token_ids: [batch,1], eos_tensor: [num_eos] -> broadcasting [batch, num_eos]
             is_eos = (token_ids == eos_tensor.unsqueeze(0)).any(dim=1, keepdim=True)  # [batch,1]
             return is_eos
-
-    # async def batch_stream(self, messages: List[dict], sample_params: List[dict]) -> Iterator[List[str]]:
-    #     input_ids, position_ids, attention_mask = self._prepare_inputs(messages)
-    #     batch_size = input_ids.shape[0]
-    #     seq_len = input_ids.shape[1]
-    #     generated_ids_tensor = torch.empty((batch_size, 0), dtype=torch.long, device=input_ids.device)
-    #     decoded_text_list = [""] * batch_size
-    #     past_key_values = self._prepare_kv_cache()
-    #
-    #     for step_idx in range(self.sllm_config.max_output_len):
-    #         logits = self.model_runner.execute(
-    #             input_ids=input_ids,
-    #             position_ids=position_ids,
-    #             attention_mask=attention_mask,
-    #             past_key_values=past_key_values,
-    #         )
-    #         next_token_logits = logits[:, -1, :]
-    #         next_token_ids = self.output_processor.sample(next_token_logits, input_ids)
-    #
-    #         if self._is_eos(next_token_ids).all():
-    #             break
-    #         generated_ids_tensor = torch.cat([generated_ids_tensor, next_token_ids], dim=-1)
-    #         next_text = self.input_processor.decode(generated_ids_tensor)
-    #         yield_data = [""] * batch_size
-    #         for i, text in enumerate(next_text):
-    #             yield_data[i] = text[len(decoded_text_list[i]):]
-    #             decoded_text_list[i] = text
-    #         yield yield_data
-    #
-    #         input_ids = next_token_ids
-    #         next_attention_mask = torch.ones_like(next_token_ids)
-    #         attention_mask = torch.cat([attention_mask, next_attention_mask], dim=-1)
-    #         position_ids = torch.full(size=(batch_size, 1), fill_value=(seq_len + step_idx), device=input_ids.device)
-    #         await asyncio.sleep(0)
 
     def close(self) -> None:
         print("[INFO] Shutting down LlmEngineV1 and clearing GPU memory...")

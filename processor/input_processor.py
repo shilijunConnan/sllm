@@ -30,3 +30,6 @@ class InputProcessor:
 
     def decode(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.tokenizer.batch_decode(token_ids, skip_special_tokens=True)
+
+    def get_pad_token_id(self) -> int:
+        return self.tokenizer.pad_token_id
