@@ -1,13 +1,14 @@
 """
 v1版本：kv cache V1版本
 """
+from typing import Optional, List,Tuple
+
 import torch
 import torch.nn as nn
 
 from sllm.utils.mappings import ACT2CLS
 from sllm.utils.config import ModelConfig
 from sllm.utils.pretrained import ModelPretrained
-from sllm.core.kvcache.kv_cache import KVCache
 
 
 class Embedding(nn.Embedding):
@@ -93,10 +94,11 @@ class SelfAttention(nn.Module):
                 input_tensor: torch.Tensor,
                 rotary_embed: RotaryEmbedding,
                 position_ids: torch.Tensor,
-                past_key_values: KVCache,
                 idx: int,
+                past_keys: Optional[List[torch.Tensor]] = None,
+                past_values: Optional[List[torch.Tensor]] = None,
                 attention_mask: torch.Tensor = None,
-                ) -> torch.Tensor:
+                ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         input_shape = input_tensor.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
         is_decode = input_tensor.shape[1] == 1
@@ -108,13 +110,17 @@ class SelfAttention(nn.Module):
         q = rotary_embed.apply_rotary_pos_emb(q, position_ids)
         k = rotary_embed.apply_rotary_pos_emb(k, position_ids)
 
-        past_key_values.update_cache(idx, k, v)
-        k, v = past_key_values.get_cache(idx)
+        if past_keys is not None and past_values is not None:
+            all_k = torch.cat((past_keys[idx], k), dim=-2).to(input_tensor.device)
+            all_v = torch.cat((past_values[idx], v), dim=-2).to(input_tensor.device)
+        else:
+            all_k = k
+            all_v = v
 
-        k = self._repeat_kv(k)
-        v = self._repeat_kv(v)
+        all_k = self._repeat_kv(all_k)
+        all_v = self._repeat_kv(all_v)
 
-        score = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+        score = torch.matmul(q, all_k.transpose(-1, -2)) * self.scale
         mask_value = torch.finfo(score.dtype).min
 
         if is_decode:
@@ -132,8 +138,8 @@ class SelfAttention(nn.Module):
             score += mask
 
         score = nn.functional.dropout(torch.softmax(score, dim=-1), p=self.attention_dropout, training=self.training)
-        output = (score @ v).transpose(1, 2).reshape(*input_shape, -1).contiguous()
-        return self.o_proj(output)
+        output = (score @ all_v).transpose(1, 2).reshape(*input_shape, -1).contiguous()
+        return self.o_proj(output), k, v
 
     def _repeat_kv(self, input_tensor: torch.Tensor) -> torch.Tensor:
         if self.repeat_times == 1:
@@ -176,13 +182,20 @@ class DecoderLayer(nn.Module):
                 input_tensor: torch.Tensor,
                 rotary_embed: RotaryEmbedding,
                 position_ids: torch.Tensor,
-                attention_mask: torch.Tensor,
-                past_key_values: KVCache,
-                idx: int) -> torch.Tensor:
-        x = input_tensor + self.self_attn(self.input_layernorm(input_tensor), rotary_embed, position_ids,
-                                          past_key_values, idx, attention_mask)
+                idx: int,
+                past_keys: Optional[torch.Tensor] = None,
+                past_values: Optional[torch.Tensor] = None,
+                attention_mask: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        output, k, v = self.self_attn(input_tensor=self.input_layernorm(input_tensor),
+                                      rotary_embed=rotary_embed,
+                                      position_ids=position_ids,
+                                      idx=idx,
+                                      past_keys=past_keys,
+                                      past_values=past_values,
+                                      attention_mask=attention_mask)
+        x = input_tensor + output
         x = x + self.mlp(self.post_attention_layernorm(x))
-        return x
+        return x, k, v
 
 
 class Qwen3Model(nn.Module):
@@ -194,24 +207,31 @@ class Qwen3Model(nn.Module):
             for _ in range(model_config.num_hidden_layers)
         ])
         self.norm = RMSNorm(model_config.hidden_size, model_config.rms_norm_eps)
-        self.rotary_emb = RotaryEmbedding(model_config.rope_theta, model_config.rope_scaling, model_config.head_dim)
+        self.rotary_embed = RotaryEmbedding(model_config.rope_theta, model_config.rope_scaling, model_config.head_dim)
 
     def forward(self,
                 input_ids: torch.Tensor,
                 position_ids: torch.Tensor,
                 attention_mask: torch.Tensor,
-                past_key_values: KVCache) -> torch.Tensor:
+                past_keys: Optional[List[torch.Tensor]] = None,
+                past_values: Optional[List[torch.Tensor]] = None,
+                ) -> Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
         input_tensor = self.embed_tokens(input_ids)
-
+        k_list = []
+        v_list = []
         for idx, layer in enumerate(self.layers):
-            input_tensor = layer(input_tensor,
-                                 self.rotary_emb,
-                                 position_ids,
-                                 attention_mask,
-                                 past_key_values,
-                                 idx)
+            input_tensor, k, v = layer(input_tensor=input_tensor,
+                                       rotary_embed=self.rotary_embed,
+                                       position_ids=position_ids,
+                                       idx=idx,
+                                       attention_mask=attention_mask,
+                                       past_keys=past_keys,
+                                       past_values=past_values,
+                                       )
+            k_list.append(k)
+            v_list.append(v)
 
-        return self.norm(input_tensor)
+        return self.norm(input_tensor), k_list, v_list
 
 
 class Qwen3ForCausalLM(nn.Module, ModelPretrained):
@@ -230,7 +250,12 @@ class Qwen3ForCausalLM(nn.Module, ModelPretrained):
                 input_ids: torch.Tensor,
                 position_ids: torch.Tensor,
                 attention_mask: torch.Tensor,
-                past_key_values: KVCache) -> torch.Tensor:
-        hidden_states = self.model(input_ids, position_ids, attention_mask, past_key_values)
+                past_keys: Optional[List[torch.Tensor]] = None,
+                past_values: Optional[List[torch.Tensor]] = None) -> Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
+        hidden_states, k_list, v_lists = self.model(input_ids=input_ids,
+                                   position_ids=position_ids,
+                                   attention_mask=attention_mask,
+                                   past_keys=past_keys,
+                                   past_values=past_values)
         output = self.lm_head(hidden_states)
-        return output
+        return output, k_list, v_lists

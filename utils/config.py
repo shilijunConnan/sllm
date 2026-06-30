@@ -5,7 +5,10 @@ class SllmConfig:
     max_seq_len = 40960
     max_input_len = 1024
     max_output_len = 1024
-    max_batch_size = 32
+    max_batch_size = 16
+    block_size = 16
+    max_kv_block_num = 1024
+    kv_block_size = 16
     def __init__(self):
         sllm_config_json_path = Path(__file__).resolve().parents[1] / "server" / "sllm_config.json"
         if not sllm_config_json_path.is_file():

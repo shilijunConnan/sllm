@@ -1,6 +1,7 @@
 {
-  "max_seq_len": 2048,
+  "max_seq_len": 200,
   "max_input_len": 100,
   "max_output_len": 100,
-  "max_batch_size": 32
+  "max_batch_size": 16,
+  "block_size": 16
 }

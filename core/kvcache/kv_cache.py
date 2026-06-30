@@ -1,22 +1,86 @@
 """
-kv cache v2: one request one KVCache
+kv cache v2.2: kv cache python block
 """
+from dataclasses import dataclass
+from collections import deque
+from typing import Tuple
+
 import torch
 
 
-class KVCache:
-    def __init__(self, num_layers: int):
-        self.k_values = [None] * num_layers
-        self.v_values = [None] * num_layers
+class PhysicalKVCache:
+    def __init__(self, num_layers: int, num_blocks: int, block_size: int, num_heads: int, head_dim: int, device="mps") -> None:
+        self.num_layers = num_layers
+        self.num_blocks = num_blocks
+        self.block_size = block_size
+        self.num_heads = num_heads
+        self.head_dim = head_dim
 
-    def update_cache(self, idx: int, k: torch.Tensor, v: torch.Tensor):
-        # [batch, n_heads, seq_len, head_dim]
-        if self.k_values[idx] is None:
-            self.k_values[idx] = k
-            self.v_values[idx] = v
-        else:
-            self.k_values[idx] = torch.cat((self.k_values[idx], k), dim=-2)
-            self.v_values[idx] = torch.cat((self.v_values[idx], v), dim=-2)
+        shape = (num_layers, num_blocks, block_size, num_heads, head_dim)
+        self.k_cache = torch.zeros(shape).to(device)
+        self.v_cache = torch.zeros(shape).to(device)
 
-    def get_cache(self, idx: int):
-        return (self.k_values[idx], self.v_values[idx])
+    def write_block(self, layer_id: int, block_id: int, offset: int, k: torch.Tensor, v: torch.Tensor) -> None:
+        self.k_cache[layer_id, block_id, offset] = k
+        self.v_cache[layer_id, block_id, offset] = v
+
+    def read_block(self, layer_id: int, block_id: int, offset: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self.k_cache[layer_id, block_id, :offset], self.v_cache[layer_id, block_id, :offset]
+
+
+@dataclass
+class BlockState:
+    ref_count: int = 0
+
+
+class KVBlockManager:
+    def __init__(self,
+                 num_layers: int,
+                 num_blocks: int,
+                 block_size: int,
+                 num_heads: int,
+                 head_dim: int,
+                 ) -> None:
+        self.num_layers = num_layers
+        self.num_blocks = num_blocks
+        self.block_size = block_size
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+
+        self.kv = PhysicalKVCache(num_layers, num_blocks, block_size, num_heads, head_dim)
+
+        self.free_blocks = deque(range(num_blocks))
+        self.block_states = {
+            i: BlockState() for i in range(num_blocks)
+        }
+        # optional: prefix cache
+        # self.hash_to_block = {}
+
+    def allocate_block(self) -> int:
+        if not self.free_blocks:
+            raise RuntimeError(f"KVBlockManager.allocate_block called on {self} failed, no free blocks.")
+
+        block_id = self.free_blocks.popleft()
+        state = self.block_states[block_id]
+        state.ref_count = 1
+        return block_id
+
+    def free_block(self, block_id: int) -> None:
+        state = self.block_states[block_id]
+        state.ref_count -= 1
+
+        if state.ref_count == 0:
+            state.seq_id = -1
+            self.free_blocks.append(block_id)
+
+    def increase_ref_count(self, block_id: int) -> None:
+        self.block_states[block_id].ref_count += 1
+
+# 这个例子记录一下，张量更新时，只要对应的shape一样就ok
+# a = torch.zeros((1, 2, 3, 4, 4))
+# cur = torch.ones((4, 2, 4))
+# print(cur)
+# a[0, 0, 0] = cur[:, 0, :]
+# a[0, 0, 1] = cur[:, 1, :]
+# # print(a[0, 0, :2])
+# print(a)

@@ -2,7 +2,7 @@ import asyncio
 import os
 from typing import Optional
 
-from core.scheduler.request import RequestState
+from core.kvcache.request import RequestState
 from sllm.engine.llm_engine import LlmEngine
 from sllm.utils.request_tools import ChatCompletionRequest
 

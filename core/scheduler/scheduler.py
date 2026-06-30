@@ -1,35 +1,37 @@
 import asyncio
-import uuid
 from collections import deque
 from typing import List
 
-from sllm.core.scheduler.request import RequestState, RequestStatus
+from core.kvcache.request import RequestState, RequestStatus
+from utils.config import SllmConfig, ModelConfig
 
 
 class Scheduler:
-    def __init__(self, max_batch_size: int = 16):
+    def __init__(self, sllm_config: SllmConfig, model_config: ModelConfig) -> None:
+        self.sllm_config = sllm_config
+        self.model_config = model_config
+
         self.prefill_waiting_queue = deque()
         self.prefill_queue: List[RequestState] = []
         self.decode_waiting_queue = deque()
         self.decode_queue: List[RequestState] = []
-        self.max_batch_size = max_batch_size
 
         self.prefill_event = asyncio.Event()
         self.decode_event = asyncio.Event()
 
-    def add_request(self, request: RequestState):
+    def add_request(self, request: RequestState) -> None:
         self.prefill_waiting_queue.append(request)
         self.prefill_event.set()
 
     def get_prefill_batch(self):
-        while len(self.prefill_queue) < self.max_batch_size and self.prefill_waiting_queue:
+        while len(self.prefill_queue) < self.sllm_config.max_batch_size and self.prefill_waiting_queue:
             request: RequestState = self.prefill_waiting_queue.popleft()
             request.status = RequestStatus.PREFILL_RUNNING
             self.prefill_queue.append(request)
         return self.prefill_queue
 
     def get_decode_batch(self):
-        while len(self.decode_queue) < self.max_batch_size and self.decode_waiting_queue:
+        while len(self.decode_queue) < self.sllm_config.max_batch_size and self.decode_waiting_queue:
             request = self.decode_waiting_queue.popleft()
             request.status = RequestStatus.DECODER_RUNNING
             self.decode_queue.append(request)
