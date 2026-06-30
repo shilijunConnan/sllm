@@ -1,3 +1,3 @@
-# sllm v2
+# sllm v2.2
 ## 新增优化
-1. Continuous Batching
+1. blocked kv cache
