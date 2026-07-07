@@ -1,5 +1,5 @@
 """
-kv cache v2.2: kv cache python block
+kv cache v3: kv cache python block + cuda paged attention
 """
 from dataclasses import dataclass
 from collections import deque
@@ -7,9 +7,17 @@ from typing import Tuple
 
 import torch
 
-
 class PhysicalKVCache:
-    def __init__(self, num_layers: int, num_blocks: int, block_size: int, num_heads: int, head_dim: int, device="cuda") -> None:
+    def __init__(
+        self,
+        num_layers: int,
+        num_blocks: int,
+        block_size: int,
+        num_heads: int,
+        head_dim: int,
+        device="cuda",
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
         self.num_layers = num_layers
         self.num_blocks = num_blocks
         self.block_size = block_size
@@ -17,8 +25,8 @@ class PhysicalKVCache:
         self.head_dim = head_dim
 
         shape = (num_layers, num_blocks, block_size, num_heads, head_dim)
-        self.k_cache = torch.zeros(shape).to(device)
-        self.v_cache = torch.zeros(shape).to(device)
+        self.k_cache = torch.zeros(shape, device=device, dtype=dtype)
+        self.v_cache = torch.zeros(shape, device=device, dtype=dtype)
 
     def write_block(self, layer_id: int, block_id: int, offset: int, k: torch.Tensor, v: torch.Tensor) -> None:
         self.k_cache[layer_id, block_id, offset] = k
@@ -40,6 +48,8 @@ class KVBlockManager:
                  block_size: int,
                  num_heads: int,
                  head_dim: int,
+                 device="cuda",
+                 dtype: torch.dtype = torch.float32,
                  ) -> None:
         self.num_layers = num_layers
         self.num_blocks = num_blocks
@@ -47,7 +57,10 @@ class KVBlockManager:
         self.num_heads = num_heads
         self.head_dim = head_dim
 
-        self.kv = PhysicalKVCache(num_layers, num_blocks, block_size, num_heads, head_dim)
+        self.kv = PhysicalKVCache(num_layers, num_blocks, block_size, num_heads, head_dim, device, dtype)
+        from sllm.core.kvcache.request import requestContext
+
+        requestContext.set_kv(self.kv)
 
         self.free_blocks = deque(range(num_blocks))
         self.block_states = {

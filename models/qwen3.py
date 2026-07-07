@@ -1,7 +1,7 @@
 """
-v1版本：kv cache V1版本
+v3版本：kv cache V3版本
 """
-from typing import Optional, List,Tuple
+from typing import Optional, List, Tuple
 
 import torch
 import torch.nn as nn
@@ -9,6 +9,12 @@ import torch.nn as nn
 from sllm.utils.mappings import ACT2CLS
 from sllm.utils.config import ModelConfig
 from sllm.utils.pretrained import ModelPretrained
+from sllm.core.kvcache.request import requestContext
+
+try:
+    import paged_attention_cuda1
+except ImportError:
+    paged_attention_cuda1 = None
 
 
 class Embedding(nn.Embedding):
@@ -95,13 +101,11 @@ class SelfAttention(nn.Module):
                 rotary_embed: RotaryEmbedding,
                 position_ids: torch.Tensor,
                 idx: int,
-                past_keys: Optional[List[torch.Tensor]] = None,
-                past_values: Optional[List[torch.Tensor]] = None,
                 attention_mask: torch.Tensor = None,
+                is_prefill: bool = True
                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         input_shape = input_tensor.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
-        is_decode = input_tensor.shape[1] == 1
 
         q = self.q_norm(self.q_proj(input_tensor).view(hidden_shape).transpose(1, 2))
         k = self.k_norm(self.k_proj(input_tensor).view(hidden_shape).transpose(1, 2))
@@ -110,36 +114,35 @@ class SelfAttention(nn.Module):
         q = rotary_embed.apply_rotary_pos_emb(q, position_ids)
         k = rotary_embed.apply_rotary_pos_emb(k, position_ids)
 
-        if past_keys is not None and past_values is not None:
-            all_k = torch.cat((past_keys[idx], k), dim=-2).to(input_tensor.device)
-            all_v = torch.cat((past_values[idx], v), dim=-2).to(input_tensor.device)
+        if is_prefill:
+            req = requestContext.get("prefill")
         else:
-            all_k = k
-            all_v = v
+            req = requestContext.get("decode")
+        req.write_block(layer_id=idx, k=k, v=v)
+        if is_prefill:
+            attn_k = self._repeat_kv(k)
+            attn_v = self._repeat_kv(v)
+            score = torch.matmul(q, attn_k.transpose(-1, -2)) * self.scale
+            mask_value = torch.finfo(score.dtype).min
 
-        all_k = self._repeat_kv(all_k)
-        all_v = self._repeat_kv(all_v)
+            if is_prefill:
+                seq_len = score.shape[-1]
+                causal_mask = torch.triu(
+                    torch.ones(seq_len, seq_len, device=score.device, dtype=torch.bool),
+                    diagonal=1,
+                )
+                score = score.masked_fill(causal_mask[None, None, :, :], mask_value)
 
-        score = torch.matmul(q, all_k.transpose(-1, -2)) * self.scale
-        mask_value = torch.finfo(score.dtype).min
+            if attention_mask is not None:
+                mask = (1 - attention_mask[:, None, None, :]) * mask_value
+                score += mask
 
-        if is_decode:
-            pass
+            score = nn.functional.dropout(torch.softmax(score, dim=-1), p=self.attention_dropout, training=self.training)
+            output = (score @ attn_v).transpose(1, 2).reshape(*input_shape, -1).contiguous()
         else:
-            seq_len = score.shape[-1]
-            causal_mask = torch.triu(
-                torch.ones(seq_len, seq_len, device=score.device, dtype=torch.bool),
-                diagonal=1,
-            )
-            score = score.masked_fill(causal_mask[None, None, :, :], mask_value)
-
-        if attention_mask is not None:
-            mask = (1 - attention_mask[:, None, None, :]) * mask_value
-            score += mask
-
-        score = nn.functional.dropout(torch.softmax(score, dim=-1), p=self.attention_dropout, training=self.training)
-        output = (score @ all_v).transpose(1, 2).reshape(*input_shape, -1).contiguous()
-        return self.o_proj(output), k, v
+            attn_output = self._decode_paged_attention(q, req, idx)
+            output = attn_output.transpose(1, 2).reshape(*input_shape, -1).contiguous()
+        return self.o_proj(output)
 
     def _repeat_kv(self, input_tensor: torch.Tensor) -> torch.Tensor:
         if self.repeat_times == 1:
@@ -147,6 +150,62 @@ class SelfAttention(nn.Module):
         batch, num_heads, seq_len, head_dim = input_tensor.shape
         input_tensor = input_tensor[:, :, None, :, :].expand(batch, num_heads, self.repeat_times, seq_len, head_dim)
         return input_tensor.reshape(batch, -1, seq_len, head_dim)
+
+    def _decode_paged_attention(self, q: torch.Tensor, req, layer_id: int) -> torch.Tensor:
+        kv = requestContext.kv
+        seq_len = req.get_sum_len()
+        seq_lens = torch.tensor([seq_len], device=q.device, dtype=torch.int32)
+        block_table = req.kv_block_table.to(device=q.device, dtype=torch.int32).contiguous().view(1, -1)
+
+        if (
+            paged_attention_cuda1 is not None
+            and q.is_cuda
+            and kv.k_cache.is_cuda
+            and q.dtype == kv.k_cache.dtype
+            and q.dtype == kv.v_cache.dtype
+        ):
+            return paged_attention_cuda1.forward(
+                q.contiguous(),
+                kv.k_cache.contiguous(),
+                kv.v_cache.contiguous(),
+                block_table,
+                seq_lens,
+                layer_id,
+            )
+
+        return self._torch_paged_attention(q, kv.k_cache, kv.v_cache, block_table[0], seq_len, layer_id)
+
+    def _torch_paged_attention(
+        self,
+        q: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        seq_len: int,
+        layer_id: int,
+    ) -> torch.Tensor:
+        block_size = k_cache.size(2)
+        num_kv_heads = k_cache.size(3)
+        repeat_times = q.size(1) // num_kv_heads
+        output = torch.empty_like(q)
+
+        for q_head in range(q.size(1)):
+            kv_head = q_head // repeat_times
+            keys = []
+            values = []
+            for token_idx in range(seq_len):
+                logical_block = token_idx // block_size
+                block_offset = token_idx % block_size
+                physical_block = int(block_table[logical_block].item())
+                keys.append(k_cache[layer_id, physical_block, block_offset, kv_head])
+                values.append(v_cache[layer_id, physical_block, block_offset, kv_head])
+
+            k = torch.stack(keys, dim=0)
+            v = torch.stack(values, dim=0)
+            score = (q[0, q_head, 0].to(k.dtype) @ k.transpose(0, 1)) * self.scale
+            output[0, q_head, 0] = (torch.softmax(score, dim=-1) @ v).to(output.dtype)
+
+        return output
 
 
 class MLP(nn.Module):
@@ -183,19 +242,16 @@ class DecoderLayer(nn.Module):
                 rotary_embed: RotaryEmbedding,
                 position_ids: torch.Tensor,
                 idx: int,
-                past_keys: Optional[torch.Tensor] = None,
-                past_values: Optional[torch.Tensor] = None,
-                attention_mask: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        output, k, v = self.self_attn(input_tensor=self.input_layernorm(input_tensor),
-                                      rotary_embed=rotary_embed,
-                                      position_ids=position_ids,
-                                      idx=idx,
-                                      past_keys=past_keys,
-                                      past_values=past_values,
-                                      attention_mask=attention_mask)
-        x = input_tensor + output
+                attention_mask: torch.Tensor = None,
+                is_prefill: bool=True) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        x = input_tensor + self.self_attn(input_tensor=self.input_layernorm(input_tensor),
+                                          rotary_embed=rotary_embed,
+                                          position_ids=position_ids,
+                                          idx=idx,
+                                          attention_mask=attention_mask,
+                                          is_prefill=is_prefill)
         x = x + self.mlp(self.post_attention_layernorm(x))
-        return x, k, v
+        return x
 
 
 class Qwen3Model(nn.Module):
@@ -213,25 +269,19 @@ class Qwen3Model(nn.Module):
                 input_ids: torch.Tensor,
                 position_ids: torch.Tensor,
                 attention_mask: torch.Tensor,
-                past_keys: Optional[List[torch.Tensor]] = None,
-                past_values: Optional[List[torch.Tensor]] = None,
+                is_prefill: bool = True
                 ) -> Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
         input_tensor = self.embed_tokens(input_ids)
-        k_list = []
-        v_list = []
         for idx, layer in enumerate(self.layers):
-            input_tensor, k, v = layer(input_tensor=input_tensor,
-                                       rotary_embed=self.rotary_embed,
-                                       position_ids=position_ids,
-                                       idx=idx,
-                                       attention_mask=attention_mask,
-                                       past_keys=past_keys,
-                                       past_values=past_values,
-                                       )
-            k_list.append(k)
-            v_list.append(v)
+            input_tensor = layer(input_tensor=input_tensor,
+                                 rotary_embed=self.rotary_embed,
+                                 position_ids=position_ids,
+                                 idx=idx,
+                                 attention_mask=attention_mask,
+                                 is_prefill=is_prefill
+                                 )
 
-        return self.norm(input_tensor), k_list, v_list
+        return self.norm(input_tensor)
 
 
 class Qwen3ForCausalLM(nn.Module, ModelPretrained):
@@ -250,12 +300,10 @@ class Qwen3ForCausalLM(nn.Module, ModelPretrained):
                 input_ids: torch.Tensor,
                 position_ids: torch.Tensor,
                 attention_mask: torch.Tensor,
-                past_keys: Optional[List[torch.Tensor]] = None,
-                past_values: Optional[List[torch.Tensor]] = None) -> Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
-        hidden_states, k_list, v_lists = self.model(input_ids=input_ids,
+                is_prefill: bool=True) -> Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
+        hidden_states = self.model(input_ids=input_ids,
                                    position_ids=position_ids,
                                    attention_mask=attention_mask,
-                                   past_keys=past_keys,
-                                   past_values=past_values)
+                                   is_prefill=is_prefill)
         output = self.lm_head(hidden_states)
-        return output, k_list, v_lists
+        return output

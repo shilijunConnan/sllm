@@ -32,12 +32,15 @@ class LlmEngine:
                                        model_config=self.model_config,
                                        tie_word_embeddings=self.model_config.tie_word_embeddings,
                                        device=self.device)
+        model_dtype = next(model.parameters()).dtype
         self.kv_manager = KVBlockManager(
             self.model_config.num_hidden_layers,
             self._calculate_max_kv_block_num(),
             self.sllm_config.block_size,
             self.model_config.num_key_value_heads,
-            self.model_config.head_dim
+            self.model_config.head_dim,
+            device=self.device,
+            dtype=model_dtype,
         )
         self.model_runner = ModelRunner(model, self.kv_manager)
 
@@ -58,7 +61,13 @@ class LlmEngine:
 
     def add_request(self, request_id: str, request: ChatCompletionRequest) -> RequestState:
         input_ids, attention_mask, position_ids = self._prepare_inputs(request.messages)
-        req = RequestState(request_id=request_id, request=request, sllm_config=self.sllm_config, kv_manager=self.kv_manager)
+        req = RequestState(
+            request_id=request_id,
+            request=request,
+            sllm_config=self.sllm_config,
+            kv_manager=self.kv_manager,
+            device=self.device,
+        )
         req.status = RequestStatus.PREFILL_WAITING
         req.input_ids = input_ids.to(self.device)
         req.inputs_token_num = input_ids.shape[-1]
@@ -159,7 +168,9 @@ class LlmEngine:
             return is_eos
     def _free_req_blocks(self, request: RequestState):
         for table_id in request.kv_block_table:
-            self.kv_manager.free_block(table_id)
+            block_id = int(table_id.item())
+            if block_id >= 0:
+                self.kv_manager.free_block(block_id)
 
 
     def close(self) -> None:

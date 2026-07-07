@@ -1,12 +1,14 @@
 import asyncio
 import enum
-from typing import List, Tuple
+from typing import TYPE_CHECKING
 
 import torch
 
 from sllm.utils.request_tools import ChatCompletionRequest
 from sllm.utils.config import SllmConfig
-from sllm.core.kvcache.kv_cache import KVBlockManager
+
+if TYPE_CHECKING:
+    from sllm.core.kvcache.kv_cache import KVBlockManager, PhysicalKVCache
 
 
 class RequestStatus(enum.Enum):
@@ -20,7 +22,7 @@ class RequestStatus(enum.Enum):
 
 class RequestState:
     def __init__(self, request_id: str, request: ChatCompletionRequest, sllm_config: SllmConfig,
-                 kv_manager: KVBlockManager):
+                 kv_manager: "KVBlockManager", device: torch.device):
         self.kv_manager = kv_manager
         self.request_id = request_id
         self.status = RequestStatus.PREFILL_WAITING
@@ -33,8 +35,12 @@ class RequestState:
 
         self.attention_mask = None
         self.position_ids = None
-        self.kv_block_table = []
-        self.last_block_offset = 0
+        self.kv_block_table = torch.full(
+            ((sllm_config.max_seq_len + sllm_config.block_size - 1) // sllm_config.block_size,),
+            -1,
+            device=device,
+            dtype=torch.int32,
+        )
 
         self.inputs_token_num = 0
         self.generated_token_num = 0
@@ -53,30 +59,30 @@ class RequestState:
     def get_sum_len(self) -> int:
         return self.inputs_token_num + self.generated_token_num
 
-    def get_last_block_id(self) -> int:
-        return self.kv_block_table[-1]
-
-    def write_block(self, k_list: List[torch.Tensor], v_list: List[torch.Tensor]) -> None:
+    def write_block(self, layer_id: int, k: torch.Tensor, v: torch.Tensor) -> None:
         """
-        k_list: [num_layers, 1, num_heads, seq_len, head_dim]
+        支持 k/v 形状为: [1, num_heads, seq_len, head_dim]
         """
-        num_layers = len(k_list)
-        seq_len = k_list[0].shape[-2]
-        bs = self.kv_manager.block_size
+        # 调整形状为 [seq_len, num_heads, head_dim] 方便按 token 维度遍历
+        k_seq = k.squeeze(0).transpose(0, 1)
+        v_seq = v.squeeze(0).transpose(0, 1)
 
-        for seq_id in range(seq_len):
-            if not self.kv_block_table or self.last_block_offset >= bs:
-                block_id = self.kv_manager.allocate_block()
-                self.kv_block_table.append(block_id)
-                self.last_block_offset = 0
+        seq_len = k_seq.size(0)
+        current_start = self.get_sum_len() - seq_len
 
-            block_id = self.kv_block_table[-1]
+        for i in range(seq_len):
+            total_offset = current_start + i
+            logical_block_id = total_offset // self.kv_manager.block_size
+            block_offset = total_offset % self.kv_manager.block_size
+            physical_block_id = int(self.kv_block_table[logical_block_id].item())
+            if physical_block_id < 0:
+                physical_block_id = self.kv_manager.allocate_block()
+                self.kv_block_table[logical_block_id] = physical_block_id
 
-            for layer_id in range(num_layers):
-                k = k_list[layer_id][0, :, seq_id, :]
-                v = v_list[layer_id][0, :, seq_id, :]
-                self.kv_manager.kv.write_block(layer_id, block_id, self.last_block_offset, k, v)
-            self.last_block_offset += 1
+            # 写入单个 token 的 kv [num_heads, head_dim]
+            self.kv_manager.kv.write_block(
+                layer_id, physical_block_id, block_offset, k_seq[i], v_seq[i]
+            )
 
     def __repr__(self):
         msg = (f"RequestStatus("
@@ -94,3 +100,51 @@ class RequestState:
                f"max_tokens: {self.max_tokens}, \n"
                f"sample_params: {self.sample_params})\n")
         return msg
+
+class RequestContext:
+    def __init__(self):
+        self.kv: "PhysicalKVCache | None" = None
+        self.prefill_request = None
+        self.decode_request = None
+        self.prefill_request_list = []
+        self.decode_request_list = []
+
+    def set_kv(self, kv: "PhysicalKVCache"):
+        self.kv = kv
+
+    def get(self, type: str):
+        if type == "prefill":
+            return self.prefill_request
+        if type == "decode":
+            return self.decode_request
+        return None
+
+    def set(self, data: RequestState, type: str):
+        if type == "prefill":
+            self.prefill_request = data
+        if type == "decode":
+            self.decode_request = data
+
+    def reset(self, type: str):
+        if type == "prefill":
+            self.prefill_request = []
+        if type == "decode":
+            self.decode_request = []
+
+
+    # def set(self, data: List[RequestState], type: str):
+    #     if type == "prefill":
+    #         self.prefill_request_list = data
+    #     if type == "decode":
+    #         self.decode_request_list = data
+    #
+    # def reset(self, type: str):
+    #     if type == "prefill":
+    #         self.prefill_request_list = []
+    #     if type == "decode":
+    #         self.decode_request_list = []
+
+    def __repr__(self):
+        return f"requestContext(prefill={self.prefill_request_list}, decode={self.decode_request_list})"
+
+requestContext = RequestContext()
