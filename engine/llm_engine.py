@@ -3,15 +3,15 @@ from typing import List, Tuple
 
 import torch
 
-from models import get_model_class
-from processor.output_processor import OutputProcessor
+from sllm.models import get_model_class
+from sllm.processor.output_processor import OutputProcessor
 from sllm.utils.config import ModelConfig, GenerationConfig, SllmConfig
 from sllm.processor.input_processor import InputProcessor
 from sllm.core.kvcache.kv_cache import KVBlockManager
 from sllm.runner.model_runner import ModelRunner
 from sllm.core.scheduler.scheduler import Scheduler
 from sllm.utils.request_tools import ChatCompletionRequest
-from core.kvcache.request import RequestState, RequestStatus
+from sllm.core.kvcache.request import RequestState, RequestStatus
 
 
 class LlmEngine:

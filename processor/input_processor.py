@@ -3,7 +3,7 @@ from typing import List, Dict
 import torch
 from transformers import AutoTokenizer
 
-from utils.config import SllmConfig
+from sllm.utils.config import SllmConfig
 
 
 class InputProcessor:

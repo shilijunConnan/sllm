@@ -10,11 +10,19 @@ dependencies = [
     "fastapi",
     "uvicorn",
 ]
-
 [tool.setuptools]
-#package-dir = {"" = "src"}
-package-dir = {"" = "."}
+package-dir = {"sllm" = "."}
+packages = [
+    "sllm.core",
+    "sllm.engine",
+    "sllm.models",
+    "sllm.processor",
+    "sllm.runner",
+    "sllm.server",
+    "sllm.utils"
+]
 
-
-[tool.setuptools.packages.find]
-where = ["."]
+[[tool.uv.index]]
+name = "tsinghua"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true # 将其设为默认源

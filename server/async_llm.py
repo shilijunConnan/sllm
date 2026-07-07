@@ -2,7 +2,7 @@ import asyncio
 import os
 from typing import Optional
 
-from core.kvcache.request import RequestState
+from sllm.core.kvcache.request import RequestState
 from sllm.engine.llm_engine import LlmEngine
 from sllm.utils.request_tools import ChatCompletionRequest
 
@@ -21,7 +21,7 @@ class AsyncLLM:
         self.decode_task = asyncio.create_task(self.engine.decode_background_loop())
 
     def shutdown(self):
-        self.engine.shutdown()
+        self.engine.close()
         self.engine = None
         self.is_shutdown = True
 

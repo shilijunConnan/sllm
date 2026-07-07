@@ -8,9 +8,9 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 
 from sllm.utils.request_tools import *
-from async_llm import AsyncLLM
+from sllm.server.async_llm import AsyncLLM
 
-
+args = None
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run sllm OpenAI-compatible streaming API server.")
     parser.add_argument("--model-path",
@@ -19,7 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--served-model-name", default=os.getenv("SLLM_MODEL_NAME", "sllm"),
                         help="Model name returned in responses.")
     parser.add_argument("--host", default=os.getenv("SLLM_HOST", "0.0.0.0"))
-    parser.add_argument("--port", type=int, default=int(os.getenv("SLLM_PORT", "8000")))
+    parser.add_argument("--port", type=int, default=int(os.getenv("SLLM_PORT", "8001")))
     return parser.parse_args()
 
 
@@ -70,4 +70,6 @@ async def create_chat_completion(request: ChatCompletionRequest):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app)
+    if args is None:
+        args = parse_args()
+    uvicorn.run(app, host=args.host, port=args.port)
