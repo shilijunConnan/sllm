@@ -44,6 +44,7 @@ def build_chunk(
 
 async def stream_generator(request_id: str, ctx: AsyncGenerator , served_model_name: str, created_time: int):
     async for delta in ctx:
+        delta = json.loads(delta)
         data = build_chunk(
             request_id=request_id,
             model=served_model_name,

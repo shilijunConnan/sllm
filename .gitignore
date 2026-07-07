@@ -1,2 +1,27 @@
-sllm.egg-info
-__pycache__
+# Python 字节码文件（所有子目录）
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# 虚拟环境（防止把几百MB的依赖库传上去）
+.venv/
+venv/
+ENV/
+env/
+
+# IDE 和编辑器缓存
+.vscode/
+.idea/
+
+# 打包与分发
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+
+# 日志文件
+*.log
+uv.lock

@@ -3,15 +3,15 @@ from typing import List, Tuple
 
 import torch
 
-from models import get_model_class
-from processor.output_processor import OutputProcessor
+from sllm.models import get_model_class
+from sllm.processor.output_processor import OutputProcessor
 from sllm.utils.config import ModelConfig, GenerationConfig, SllmConfig
 from sllm.processor.input_processor import InputProcessor
 from sllm.core.kvcache.kv_cache import KVBlockManager
 from sllm.runner.model_runner import ModelRunner
 from sllm.core.scheduler.scheduler import Scheduler
 from sllm.utils.request_tools import ChatCompletionRequest
-from core.kvcache.request import RequestState, RequestStatus
+from sllm.core.kvcache.request import RequestState, RequestStatus
 
 
 class LlmEngine:
@@ -110,6 +110,7 @@ class LlmEngine:
 
             if decode_requests:
                 logits = self.model_runner.execute(decode_requests, is_prefill=False)
+
                 for req_idx, req in enumerate(decode_requests):
                     next_token_logits = logits[req_idx]
                     next_token_ids = self.output_processor.sample(next_token_logits, req.input_ids)
@@ -119,14 +120,12 @@ class LlmEngine:
                         req.words_queue.put_nowait(None)
                         self._free_req_blocks(req)
                         continue
+
                     req.generated_ids.append(next_token_ids.item())
                     req.generated_token_num += 1
 
-                    cur_text = self.input_processor.decode(req.generated_ids)
-                    one_token = cur_text[0][len(req.generated_text[0]):]
-                    req.generated_text = cur_text
-                    if one_token != "":
-                        req.words_queue.put_nowait(one_token)
+                    cur_text = self.input_processor.decode(next_token_ids)[0]
+                    req.words_queue.put_nowait(cur_text)
                     req.attention_mask = None
                     req.position_ids = None
                 self.scheduler.remove_finished_requests()

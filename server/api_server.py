@@ -8,13 +8,13 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 
 from sllm.utils.request_tools import *
-from async_llm import AsyncLLM
+from sllm.server.async_llm import AsyncLLM
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run sllm OpenAI-compatible streaming API server.")
     parser.add_argument("--model-path",
-                        default=os.getenv("SLLM_MODEL_PATH", "/Users/shilijun-air/shilijun/huggingface/Qwen3-0.6B"),
+                        default=os.getenv("SLLM_MODEL_PATH", "/voyager/huggingface/Qwen3-0.6B"),
                         help="Path to model directory.")
     parser.add_argument("--served-model-name", default=os.getenv("SLLM_MODEL_NAME", "sllm"),
                         help="Model name returned in responses.")

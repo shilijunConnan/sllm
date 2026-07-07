@@ -1,16 +1,16 @@
-import torch
 from torch.utils.cpp_extension import load
+import torch 
 
-# 运行时自动编译
-my_lib = load(
-    name="my_add_extension",
-    sources=["a.cpp"],
-    verbose=True
+vector_add = load(
+    name="vector_add",
+    sources=[
+        "vector_add.cpp",
+        "vector_add_kernel.cu",
+    ],
+    verbose=True,
 )
-
-# 使用编译后的扩展
-x = torch.ones(3)
-y = torch.ones(3) * 2
-z = my_lib.forward(x, y)
-
-print(z)  # 输出: tensor([3., 3., 3.])
+shape = (1024)
+a = torch.randn(1024, device="cuda")
+b = torch.randn(1024, device="cuda")
+c = vector_add.vector_add(a,b)
+print(c)

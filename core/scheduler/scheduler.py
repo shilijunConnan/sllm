@@ -2,8 +2,8 @@ import asyncio
 from collections import deque
 from typing import List
 
-from core.kvcache.request import RequestState, RequestStatus
-from utils.config import SllmConfig, ModelConfig
+from sllm.core.kvcache.request import RequestState, RequestStatus
+from sllm.utils.config import SllmConfig, ModelConfig
 
 
 class Scheduler:

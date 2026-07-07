@@ -1,8 +1,9 @@
 import asyncio
 import os
 from typing import Optional
+import json
 
-from core.kvcache.request import RequestState
+from sllm.core.kvcache.request import RequestState
 from sllm.engine.llm_engine import LlmEngine
 from sllm.utils.request_tools import ChatCompletionRequest
 
@@ -35,4 +36,7 @@ class AsyncLLM:
                 token = await req.words_queue.get()
                 if token is None:
                     break
-                yield token
+                delta = {
+                    "content": token
+                }
+                yield json.dumps(delta)

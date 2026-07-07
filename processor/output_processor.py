@@ -1,6 +1,6 @@
 import torch
 
-from utils.config import GenerationConfig, SllmConfig
+from sllm.utils.config import GenerationConfig, SllmConfig
 
 
 class OutputProcessor:

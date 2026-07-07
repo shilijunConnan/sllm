@@ -9,7 +9,7 @@ import torch
 
 
 class PhysicalKVCache:
-    def __init__(self, num_layers: int, num_blocks: int, block_size: int, num_heads: int, head_dim: int, device="mps") -> None:
+    def __init__(self, num_layers: int, num_blocks: int, block_size: int, num_heads: int, head_dim: int, device="cuda") -> None:
         self.num_layers = num_layers
         self.num_blocks = num_blocks
         self.block_size = block_size

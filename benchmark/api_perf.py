@@ -14,8 +14,8 @@ CONCURRENT_USERS = 16  # 并发用户数（压测线索数）
 TOTAL_REQUESTS = 32  # 总共测试的请求数
 
 # 测试用的 Prompt
-dataset_path = "/Users/shilijun-air/shilijun/huggingface/GSM8K_zh.json"
-tokenizer_path = "/Users/shilijun-air/shilijun/huggingface/Qwen3-0.6B"
+dataset_path = "/voyager/huggingface/GSM8K_zh.json"
+tokenizer_path = "/voyager/huggingface/Qwen3-0.6B"
 tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
 # ============================================
 
@@ -66,6 +66,8 @@ async def send_stream_request(client: httpx.AsyncClient, semaphore: asyncio.Sema
                             delta = data_json["choices"][0].get("delta", {})
                             if "content" in delta and delta["content"]:
                                 output_text = output_text + delta["content"]
+                            else:
+                                output_text = output_text + delta
                         except Exception:
                             pass
 

@@ -3,7 +3,7 @@ from typing import List, Dict
 import torch
 from transformers import AutoTokenizer
 
-from utils.config import SllmConfig
+from sllm.utils.config import SllmConfig
 
 
 class InputProcessor:
@@ -30,3 +30,8 @@ class InputProcessor:
 
     def decode(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.tokenizer.batch_decode(token_ids, skip_special_tokens=True)
+
+
+# if "__main__" == __name__:
+#     model_path = "/voyager/huggingface/Qwen3-0.6B";
+#     tokenizer = AutoTokenizer.from_pretrained(model_path)

@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from safetensors.torch import load_file, save_file
 
-from utils.config import ModelConfig
+from sllm.utils.config import ModelConfig
 
 
 class ModelPretrained:
