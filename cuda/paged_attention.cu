@@ -41,7 +41,6 @@ __global__ void score_softmax_kernel(
     }
     __syncthreads();
 
-
     for(int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
         if (tid < stride) {
             tmax[tid] = fmaxf(tmax[tid], tmax[tid + stride]);
@@ -89,16 +88,16 @@ __global__ void q_matmul_k_kernel(
     int tid = threadIdx.x;
     // q [batch,q_heads, 1, head_dim]
     // k [num_layers, num_blocks, k_heads, block_size, head_dim]
-    // score [batch, 1_heads, 1, seq_len]
+    // score [batch, q_heads, 1, seq_len]
     int batch_id = blockIdx.x / q_heads;
     int q_head_id = blockIdx.x % q_heads;
 
-    int q_memory_start = (batch_id * q_heads + q_head_id)* head_dim;
-    int score_memory_start = (batch_id * q_heads + q_head_id)* seq_len;
+    int q_memory_start = (batch_id * q_heads + q_head_id) * head_dim;
+    int score_memory_start = (batch_id * q_heads + q_head_id) * seq_len;
 
     // 第一版一个线程计算一个score
     for (int offset = tid; offset < seq_len; offset += blockDim.x) {
-        int block_id = block_table[batch_id * max_num_blocks + seq_offset / block_size];
+        int block_id = block_table[batch_id * max_num_blocks + offset / block_size];
         int seq_id = offset % block_size;
         int k_head_id = q_head_id / group_size;
 
@@ -130,14 +129,14 @@ __global__ void score_matmul_v_kernel(
     int head_dim)
 {
     int tid = threadIdx.x;
-    // score [batch, 1_heads, 1, seq_len]
+    // score [batch, q_heads, 1, seq_len]
     // v [num_layers, num_blocks, k_heads, block_size, head_dim]
-    // out [batch,q_heads, 1, head_dim]
+    // out [batch, q_heads, 1, head_dim]
     int batch_id = blockIdx.x / q_heads;
     int out_head_id = blockIdx.x % q_heads;
 
-    int out_memory_start = (batch_id * q_heads + out_head_id)* head_dim;
-    int score_memory_start = (batch_id * q_heads + out_head_id)* seq_len;
+    int out_memory_start = (batch_id * q_heads + out_head_id) * head_dim;
+    int score_memory_start = (batch_id * q_heads + out_head_id) * seq_len;
 
     // 第一版一个线程计算一个head_dim
     for (int dim_offset = tid; dim_offset < head_dim; dim_offset += blockDim.x) {
@@ -162,7 +161,6 @@ torch::Tensor paged_attention_forward(
     int64_t seq_len,
     int64_t layer)
 {
-
     CHECK_INPUT(q);
     CHECK_INPUT(k_cache);
     CHECK_INPUT(v_cache);
@@ -173,11 +171,12 @@ torch::Tensor paged_attention_forward(
     CHECK_FLOAT(v_cache);
     CHECK_INT(block_table);
 
+
     const int num_layers = k_cache.size(0);
     const int num_blocks = k_cache.size(1);
-    const int block_size = k_cache.size(2);
-    const int k_heads  = k_cache.size(3);
-    const int head_dim   = k_cache.size(4);
+    const int k_heads = k_cache.size(2);
+    const int block_size = k_cache.size(3);
+    const int head_dim = k_cache.size(4);
 
     const int batch = q.size(0);
     const int q_heads = q.size(1);
@@ -185,77 +184,96 @@ torch::Tensor paged_attention_forward(
     const int group_size = q_heads / k_heads;
     const int max_num_blocks = block_table.size(1);
 
-    TORCH_CHECK(layer >= 0 && layer < num_layers);
+    TORCH_CHECK(layer >= 0 && layer < num_layers, "Layer index out of bounds");
 
     auto output = torch::zeros_like(q);
 
-
     // 1. Q@K.T 
-    const float scale = 1 / std::sqrt(head_dim);
-    auto score = torch::zeros({batch, q_heads, seq_cur_len, seq_len}, q.options());
+    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    auto score = torch::zeros({batch, q_heads, seq_cur_len, static_cast<int>(seq_len)}, q.options());
 
     dim3 gridShape1(batch * q_heads, 1, 1);
     dim3 blockShape1(128);
+    
+    // 获取数据指针
+    float* q_ptr = q.data_ptr<float>();
+    float* k_ptr = k_cache.data_ptr<float>();
+    int* block_table_ptr = block_table.data_ptr<int>();
+    float* score_ptr = score.data_ptr<float>();
+    
     q_matmul_k_kernel<<<gridShape1, blockShape1>>>(
-        q.data_ptr<float>(),
-        k_cache.data_ptr<float>(),
-        block_table.data_ptr<int>(),
-        score.data_ptr<float>(),
-
-        static_cast<float>(scale),
+        q_ptr,
+        k_ptr,
+        block_table_ptr,
+        score_ptr,
+        scale,
         static_cast<int>(seq_len),
         q_heads,
         group_size,
         max_num_blocks,
-
         static_cast<int>(layer),
         num_blocks,
         k_heads,
         block_size,
         head_dim
     );
-    cudaError_t err = cudaGetLastError();
+    
+    cudaError_t err1 = cudaGetLastError();
     TORCH_CHECK(
-        err == cudaSuccess,
-        "Softmax Kernel Launch Failed: ",
-        cudaGetErrorString(err));
+        err1 == cudaSuccess,
+        "Q@K.T Kernel Launch Failed: ",
+        cudaGetErrorString(err1)
+    );
 
     // 2. softmax
     dim3 gridShape2(batch * q_heads * seq_cur_len, 1, 1);
     dim3 blockShape2(128, 1, 1);
     size_t smem = sizeof(float) * blockShape2.x * 2;
-    score_softmax_kernel<<<gridShape2, blockShape2, smem>>>(score, batch, q_heads, seq_cur_len, seq_len);
-    cudaError_t err = cudaGetLastError();
+    
+    score_softmax_kernel<<<gridShape2, blockShape2, smem>>>(
+        score_ptr, 
+        batch, 
+        q_heads, 
+        seq_cur_len, 
+        static_cast<int>(seq_len)
+    );
+    
+    cudaError_t err2 = cudaGetLastError();
     TORCH_CHECK(
-        err == cudaSuccess,
+        err2 == cudaSuccess,
         "Softmax Kernel Launch Failed: ",
-        cudaGetErrorString(err));
+        cudaGetErrorString(err2)
+    );
 
     // 3. output 
     dim3 gridShape3(batch * q_heads, 1, 1);
     dim3 blockShape3(128);
+    
+    float* output_ptr = output.data_ptr<float>();
+    float* v_ptr = v_cache.data_ptr<float>();
+    
     score_matmul_v_kernel<<<gridShape3, blockShape3>>>(
-        score.data_ptr<float>(),
-        v_cache.data_ptr<float>(),
-        block_table.data_ptr<int>(),
-        output.data_ptr<float>(),
-
+        score_ptr,
+        v_ptr,
+        block_table_ptr,
+        output_ptr,
         static_cast<int>(seq_len),
         q_heads,
         group_size,
         max_num_blocks,
-
         static_cast<int>(layer),
         num_blocks,
         k_heads,
         block_size,
         head_dim
     );
-    cudaError_t err = cudaGetLastError();
+
+    cudaError_t err3 = cudaGetLastError();
     TORCH_CHECK(
-        err == cudaSuccess,
+        err3 == cudaSuccess,
         "Softmax Kernel Launch Failed: ",
-        cudaGetErrorString(err));
-    cudaDeviceSynchronize();
+        cudaGetErrorString(err3)
+    );
+    
     return output;
 }

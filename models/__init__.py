@@ -9,3 +9,4 @@ def get_model_class(arch_name: str):
     if arch_name not in _MODELS_REGISTRY:
         raise ValueError(f"Model architecture {arch_name} 不支持！")
     return _MODELS_REGISTRY[arch_name]
+

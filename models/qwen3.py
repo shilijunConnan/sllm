@@ -13,7 +13,7 @@ from sllm.utils.pretrained import ModelPretrained
 from sllm.core.kvcache.request import requestContext
 
 try:
-    import paged_attention
+    from sllm.cuda import paged_attention
 except ImportError:
     paged_attention = None
 
@@ -156,17 +156,14 @@ class SelfAttention(nn.Module):
         kv = requestContext.kv
         seq_len = req.get_sum_len()
         seq_lens = torch.tensor([seq_len], device=q.device, dtype=torch.int32)
-        block_table = req.kv_block_table.to(device=q.device, dtype=torch.int32).contiguous().view(1, -1)
-
-        assert(paged_attention is not None, "paged attention is None")
-        assert (
-            q.is_cuda
-            and kv.k_cache.is_cuda
-            and q.dtype == kv.k_cache.dtype
-            and q.dtype == kv.v_cache.dtype,
-            "cuda check failed"
-        )
-        return paged_attention.forward(
+        block_table = req.kv_block_table.to(device=q.device, dtype=torch.int32).unsqueeze(0).contiguous()
+        # print("q:", q.shape)
+        # print("k_cache:", kv.k_cache.shape)
+        # print("v_cache:", kv.v_cache.shape)
+        # print("block_table:", block_table.shape)
+        # print("seq_lens:", seq_lens.shape)
+        # print("layer_id:", layer_id)
+        result = paged_attention.forward(
             q.contiguous(),
             kv.k_cache.contiguous(),
             kv.v_cache.contiguous(),
@@ -174,9 +171,9 @@ class SelfAttention(nn.Module):
             seq_lens,
             layer_id,
         )
-
-
-
+    
+        return result
+      
 
 class MLP(nn.Module):
     def __init__(self,

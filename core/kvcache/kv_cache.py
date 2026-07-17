@@ -31,7 +31,7 @@ class PhysicalKVCache:
 
     def write_block(self, layer_id: int, block_id: int, offset: int, k: torch.Tensor, v: torch.Tensor) -> None:
         self.k_cache[layer_id, block_id, :, offset, :] = k
-        self.v_cache[layer_id, block_id, :, offset:, :] = v
+        self.v_cache[layer_id, block_id, :, offset, :] = v
 
     def read_block(self, layer_id: int, block_id: int, offset: int) -> Tuple[torch.Tensor, torch.Tensor]:
         return self.k_cache[layer_id, block_id, :, :offset, :], self.v_cache[layer_id, block_id, :, :offset, :]
