@@ -14,7 +14,6 @@ dependencies = [
 package-dir = {"sllm" = "."}
 packages = [
     "sllm.cuda",
-    "sllm.cuda1",
     "sllm.core",
     "sllm.engine",
     "sllm.models",

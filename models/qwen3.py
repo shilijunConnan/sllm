@@ -2,6 +2,7 @@
 v3版本：kv cache V3版本
 """
 from typing import Optional, List, Tuple
+from wsgiref.validate import assert_
 
 import torch
 import torch.nn as nn
@@ -12,9 +13,9 @@ from sllm.utils.pretrained import ModelPretrained
 from sllm.core.kvcache.request import requestContext
 
 try:
-    import paged_attention_cuda1
+    import paged_attention
 except ImportError:
-    paged_attention_cuda1 = None
+    paged_attention = None
 
 
 class Embedding(nn.Embedding):
@@ -157,55 +158,24 @@ class SelfAttention(nn.Module):
         seq_lens = torch.tensor([seq_len], device=q.device, dtype=torch.int32)
         block_table = req.kv_block_table.to(device=q.device, dtype=torch.int32).contiguous().view(1, -1)
 
-        if (
-            paged_attention_cuda1 is not None
-            and q.is_cuda
+        assert(paged_attention is not None, "paged attention is None")
+        assert (
+            q.is_cuda
             and kv.k_cache.is_cuda
             and q.dtype == kv.k_cache.dtype
-            and q.dtype == kv.v_cache.dtype
-        ):
-            return paged_attention_cuda1.forward(
-                q.contiguous(),
-                kv.k_cache.contiguous(),
-                kv.v_cache.contiguous(),
-                block_table,
-                seq_lens,
-                layer_id,
-            )
+            and q.dtype == kv.v_cache.dtype,
+            "cuda check failed"
+        )
+        return paged_attention.forward(
+            q.contiguous(),
+            kv.k_cache.contiguous(),
+            kv.v_cache.contiguous(),
+            block_table,
+            seq_lens,
+            layer_id,
+        )
 
-        return self._torch_paged_attention(q, kv.k_cache, kv.v_cache, block_table[0], seq_len, layer_id)
 
-    def _torch_paged_attention(
-        self,
-        q: torch.Tensor,
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
-        block_table: torch.Tensor,
-        seq_len: int,
-        layer_id: int,
-    ) -> torch.Tensor:
-        block_size = k_cache.size(2)
-        num_kv_heads = k_cache.size(3)
-        repeat_times = q.size(1) // num_kv_heads
-        output = torch.empty_like(q)
-
-        for q_head in range(q.size(1)):
-            kv_head = q_head // repeat_times
-            keys = []
-            values = []
-            for token_idx in range(seq_len):
-                logical_block = token_idx // block_size
-                block_offset = token_idx % block_size
-                physical_block = int(block_table[logical_block].item())
-                keys.append(k_cache[layer_id, physical_block, block_offset, kv_head])
-                values.append(v_cache[layer_id, physical_block, block_offset, kv_head])
-
-            k = torch.stack(keys, dim=0)
-            v = torch.stack(values, dim=0)
-            score = (q[0, q_head, 0].to(k.dtype) @ k.transpose(0, 1)) * self.scale
-            output[0, q_head, 0] = (torch.softmax(score, dim=-1) @ v).to(output.dtype)
-
-        return output
 
 
 class MLP(nn.Module):

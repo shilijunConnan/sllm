@@ -1,3 +1,1 @@
-# sllm v2
-## 新增优化
-1. Continuous Batching
+# sllm v3.1 paged attention kernel

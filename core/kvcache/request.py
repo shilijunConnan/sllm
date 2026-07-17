@@ -63,11 +63,8 @@ class RequestState:
         """
         支持 k/v 形状为: [1, num_heads, seq_len, head_dim]
         """
-        # 调整形状为 [seq_len, num_heads, head_dim] 方便按 token 维度遍历
-        k_seq = k.squeeze(0).transpose(0, 1)
-        v_seq = v.squeeze(0).transpose(0, 1)
 
-        seq_len = k_seq.size(0)
+        seq_len = k.size(2)
         current_start = self.get_sum_len() - seq_len
 
         for i in range(seq_len):
@@ -79,9 +76,8 @@ class RequestState:
                 physical_block_id = self.kv_manager.allocate_block()
                 self.kv_block_table[logical_block_id] = physical_block_id
 
-            # 写入单个 token 的 kv [num_heads, head_dim]
             self.kv_manager.kv.write_block(
-                layer_id, physical_block_id, block_offset, k_seq[i], v_seq[i]
+                layer_id, physical_block_id, block_offset, k[0,:, i, :], v[0,:, i, :]
             )
 
     def __repr__(self):

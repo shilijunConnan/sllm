@@ -20,20 +20,21 @@ class PhysicalKVCache:
     ) -> None:
         self.num_layers = num_layers
         self.num_blocks = num_blocks
-        self.block_size = block_size
         self.num_heads = num_heads
+        self.block_size = block_size
         self.head_dim = head_dim
 
-        shape = (num_layers, num_blocks, block_size, num_heads, head_dim)
+        self.num_heads = num_heads
+        shape = (num_layers, num_blocks, num_heads, block_size, head_dim)
         self.k_cache = torch.zeros(shape, device=device, dtype=dtype)
         self.v_cache = torch.zeros(shape, device=device, dtype=dtype)
 
     def write_block(self, layer_id: int, block_id: int, offset: int, k: torch.Tensor, v: torch.Tensor) -> None:
-        self.k_cache[layer_id, block_id, offset] = k
-        self.v_cache[layer_id, block_id, offset] = v
+        self.k_cache[layer_id, block_id, :, offset, :] = k
+        self.v_cache[layer_id, block_id, :, offset:, :] = v
 
     def read_block(self, layer_id: int, block_id: int, offset: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        return self.k_cache[layer_id, block_id, :offset], self.v_cache[layer_id, block_id, :offset]
+        return self.k_cache[layer_id, block_id, :, :offset, :], self.v_cache[layer_id, block_id, :, :offset, :]
 
 
 @dataclass
