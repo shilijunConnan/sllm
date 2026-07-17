@@ -10,6 +10,8 @@ from sllm.utils.mappings import ACT2CLS
 from sllm.utils.config import ModelConfig
 from sllm.utils.pretrained import ModelPretrained
 from sllm.core.kvcache.request import requestContext
+import sllm.cuda1.paged_attention_cuda1
+
 
 try:
     import paged_attention_cuda1
